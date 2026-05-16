@@ -1,0 +1,46 @@
+{
+  "users": {
+    "admin": {
+      "password_hash": "70addddcf6a9252fcd6cdcb563a66b1c17abc203cdab9b02f6952fad6711426a",
+      "salt": "0f549b1e469a5db281387cfb309165ac",
+      "role": "admin",
+      "security_question": "Usuario por defecto - cambiar via 'Recuperar contraseña'",
+      "security_answer_hash": "7789e1c8033f2eb4ae0837ce379ab4c00ea64d615712d43f0a12ad3ad4745c6f",
+      "security_salt": "9479a1c89a15cc5dba08266076a065fb",
+      "created_at": "2026-05-11T00:50:37",
+      "default": true
+    },
+    "medico": {
+      "password_hash": "01d28e9147d8ed6477073a6fdc8e7010a26e8b3d639af303e2e3cfb2edb6bf98",
+      "salt": "afe0582632ae85188401803f23bbb571",
+      "role": "medico",
+      "security_question": "Usuario por defecto - cambiar via 'Recuperar contraseña'",
+      "security_answer_hash": "3d6a792e7c920fbd617b2e520e53dda72ce9d5d76fe093ee737f346367177bfc",
+      "security_salt": "ea376550a9758b476114ab4d22445635",
+      "created_at": "2026-05-11T00:50:37",
+      "default": true
+    },
+    "olanodaniel123": {
+      "password_hash": "99673361f4eb19ac6b92131788f3170030cf50803ffd89a2ab16309cddeaf52c",
+      "salt": "f21b173d3984b42ca6455f33f992c303",
+      "role": "medico",
+      "nombre_completo": "RICARDO DANIEL OLANO",
+      "matricula": "MP 110957",
+      "security_question": "LEON",
+      "security_answer_hash": "388b5815d75f49460d56b69d21b4bc5e407c73fd7a6a0829f0b79631fa5b9040",
+      "security_salt": "b92cac462375929dddcd090636ce93aa",
+      "created_at": "2026-05-11T00:52:11"
+    },
+    "olanodaniel": {
+      "password_hash": "b2bb85d608091aa53cca6c01ffce1f9971a2ec35a2367adbc673462a0e9f4abc",
+      "salt": "9d5b7ccb6f617b0433f7bdfb9d8f59bc",
+      "role": "medico",
+      "nombre_completo": "RICARDO DANIEL OLANO",
+      "matricula": "MP 110957",
+      "security_question": "PRIMERA MASCOTA",
+      "security_answer_hash": "c7b82e2d3627fcad7bd7c031c0baa0c1fbc8a371414b1b19d83373297c25b24e",
+      "security_salt": "2b5197f2abe1e3e87b62b2a16c42317c",
+      "created_at": "2026-05-12T19:24:00"
+    }
+  }
+}

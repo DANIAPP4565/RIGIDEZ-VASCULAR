@@ -1,0 +1,63 @@
+@echo off
+chcp 65001 >nul
+title Instalador de dependencias - Vascular Health Analyzer
+echo.
+echo ========================================================
+echo   INSTALADOR DE DEPENDENCIAS - APP VOP
+echo ========================================================
+echo.
+echo Este script instala las librerias que necesita app.py:
+echo   - streamlit, matplotlib, numpy, pandas
+echo   - fpdf2, openpyxl, pdfplumber, Pillow
+echo.
+echo Puede tardar 1 a 3 minutos. No cierre esta ventana.
+echo.
+pause
+
+REM Detectar Python
+where python >nul 2>nul
+if %ERRORLEVEL%==0 (
+    set PYCMD=python
+) else (
+    where py >nul 2>nul
+    if %ERRORLEVEL%==0 (
+        set PYCMD=py
+    ) else (
+        echo.
+        echo [ERROR] No se encontro Python instalado.
+        echo Descarguelo desde https://www.python.org/downloads/
+        echo y marque "Add Python to PATH" durante la instalacion.
+        echo.
+        pause
+        exit /b 1
+    )
+)
+
+echo.
+echo Usando: %PYCMD%
+%PYCMD% --version
+echo.
+
+echo Actualizando pip...
+%PYCMD% -m pip install --upgrade pip
+
+echo.
+echo Instalando librerias...
+%PYCMD% -m pip install streamlit matplotlib numpy pandas fpdf2 openpyxl pdfplumber Pillow
+
+if %ERRORLEVEL% NEQ 0 (
+    echo.
+    echo [ERROR] Fallo la instalacion. Probando con --user...
+    %PYCMD% -m pip install --user streamlit matplotlib numpy pandas fpdf2 openpyxl pdfplumber Pillow
+)
+
+echo.
+echo ========================================================
+echo   INSTALACION FINALIZADA
+echo ========================================================
+echo.
+echo Ya puede ejecutar la app con "ejecutar_app.bat"
+echo o desde la consola con:
+echo    streamlit run "G:\Mi unidad\APP VOP\app.py"
+echo.
+pause
