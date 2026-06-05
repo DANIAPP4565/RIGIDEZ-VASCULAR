@@ -127,8 +127,10 @@ NOTA_METODOLOGICA_RIESGO = (
     "La estimación vascular de riesgo de esta app no reemplaza scores validados como SCORE2, "
     "SCORE2-OP, Framingham o ASCVD. Integra marcadores vasculares y hemodinámicos, "
     "especialmente VOP carótido-femoral, presión arterial y presión de pulso. "
-    "El punto de corte VOP > 10 m/s se consigna como marcador de daño vascular/lesión de órgano blanco "
-    "según consensos y guías de hipertensión arterial."
+    "En pacientes de 60 a 70 años no se utiliza VOP > 10 m/s como criterio aislado "
+    "de EVA ni de lesión de órgano blanco: se interpreta contra percentiles/rangos esperados "
+    "para la edad cronológica. En ese grupo, EVA se reserva para valores claramente por encima "
+    "del percentilo 90 o alejados del rango fisiológico esperado."
 )
 
 
@@ -233,8 +235,8 @@ def _df_registros(usuario_actual: str, rol: str):
         "vop_cf_ms", "distancia_cf_cm", "tiempo_transito_cf_ms",
         "pas_mmhg", "pad_mmhg", "pam_mmhg", "pp_mmhg",
         "p10_ms", "p25_ms", "p50_ms", "p75_ms", "p90_ms",
-        "edad_vascular", "fenotipo_vascular_unico", "estimacion_vascular_riesgo",
-        "lob_vop_mayor_10", "estimacion_vascular_elevada_por_vop_mayor_10",
+        "edad_vascular", "fenotipo_vascular_unico", "patron_rigidez_vascular", "estimacion_vascular_riesgo",
+        "lob_por_rigidez_vascular", "lob_vop_mayor_10", "estimacion_vascular_elevada_por_vop_mayor_10",
         "fuente_vop", "archivo_importado"
     ]
     columnas = [c for c in columnas_preferidas if c in df.columns] + [c for c in df.columns if c not in columnas_preferidas]
@@ -278,24 +280,76 @@ class VascularEngine:
 
     @staticmethod
     def obtener_percentiles(edad: int, sexo: str):
+        """Percentiles operativos de VOP cf por edad.
+
+        Actualización clínica:
+        - En pacientes de 60 a 70 años se evita usar el punto fijo de 10 m/s como
+          diagnóstico de EVA. La interpretación se realiza contra valores esperados
+          para la década de vida.
+        - Para 60-70 años se usa una tabla operativa basada en referencias clínicas:
+          p50 ~9,7 m/s, p75 ~11,2 m/s y p90 ~13,1 m/s.
+        """
+        if 60 <= int(edad) <= 70:
+            # Valores de referencia operativos para 60-70 años.
+            # p75 se aproxima al límite superior reportado en población sana argentina.
+            return 7.2, 8.47, 9.7, 11.2, 13.1
         base = 5.5 if sexo == "Femenino" else 6.0
         inc = 0.08 * (edad - 20) if edad > 20 else 0
         p50 = base + inc
         return tuple(round(v, 2) for v in (p50 * 0.80, p50 * 0.90, p50, p50 * 1.15, p50 * 1.30))
 
     @staticmethod
-    def clasificar_fenotipo(vop, p10, p90):
-        """Clasificacion segun guias ARTERY 2024:
-           - SUPERNOVA: VOP < p10 (segun sexo y edad)
-           - HVA (Envejecimiento Vascular Saludable): p10 <= VOP <= p90
-           - EVA: VOP > p90
-        LOB (lesion de organo blanco) es una marca adicional cuando VOP > 10 m/s,
-        independiente del fenotipo (se reporta por separado).
+    def es_grupo_60_70(edad):
+        try:
+            return 60 <= int(edad) <= 70
+        except Exception:
+            return False
+
+    @staticmethod
+    def lob_por_rigidez(vop, edad, p90):
+        """Define lesión de órgano blanco por rigidez arterial.
+
+        En 60-70 años, VOP > 10 m/s NO se considera por sí sola LOB/EVA porque
+        puede ser un valor esperado para la edad. En ese grupo se exige superar
+        claramente el percentilo 90/rango esperado.
+        """
+        if VascularEngine.es_grupo_60_70(edad):
+            return vop > p90
+        return vop > 10
+
+    @staticmethod
+    def patron_rigidez_vascular(vop, edad, p75, p90):
+        if VascularEngine.es_grupo_60_70(edad):
+            if vop > p90:
+                return "Rigidez vascular patológica para la edad (>p90)"
+            if vop > p75:
+                return "Rigidez vascular aumentada para la edad (p75-p90), no EVA"
+            return "Envejecimiento vascular fisiológico esperado para 60-70 años"
+        if vop > p90:
+            return "Rigidez vascular patológica para edad y sexo (>p90)"
+        if vop > p75:
+            return "Rigidez vascular aumentada para edad y sexo (p75-p90)"
+        return "Rigidez vascular dentro del rango esperado por edad y sexo"
+
+    @staticmethod
+    def clasificar_fenotipo(vop, p10, p90, edad=None, p75=None):
+        """Clasificación fenotípica basada en percentiles por edad.
+
+        - SUPERNOVA: VOP < p10.
+        - HVA/envejecimiento fisiológico: VOP entre p10 y p90.
+        - EVA: VOP > p90.
+
+        Regla especial 60-70 años: VOP alrededor de 10 m/s no se informa como EVA;
+        se considera esperable/fisiológica salvo que supere claramente el p90.
         """
         if vop < p10:
             return "SUPERNOVA (Envejecimiento Vascular Supranormal)", COLOR_SUPERNOVA, "Bajo"
         if vop > p90:
             return "EVA (Envejecimiento Vascular Acelerado)", COLOR_EVA, "Alto"
+        if VascularEngine.es_grupo_60_70(edad):
+            if p75 is not None and vop > p75:
+                return "HVA con rigidez aumentada para la edad, sin criterio de EVA", "#E59866", "Moderado"
+            return "HVA (Envejecimiento Vascular Fisiológico para la edad)", COLOR_NORMAL, "Bajo"
         return "HVA (Envejecimiento Vascular Saludable)", COLOR_NORMAL, "Bajo"
 
     @staticmethod
@@ -314,9 +368,20 @@ class VascularEngine:
         return round(pad + (pas - pad) / 3, 1)
 
     @staticmethod
-    def estimacion_vascular_riesgo_global(vop, pas, pad, edad):
+    def estimacion_vascular_riesgo_global(vop, pas, pad, edad, p75=None, p90=None):
         pp = pas - pad
         hta = pas >= 140 or pad >= 90
+        if VascularEngine.es_grupo_60_70(edad):
+            # En 60-70 años la VOP se contextualiza por percentiles.
+            if p90 is not None and vop > p90:
+                return "Muy Alto" if hta or pp >= 60 else "Alto"
+            if p75 is not None and vop > p75:
+                return "Alto" if hta or pp >= 60 else "Moderado"
+            if pp >= 60 or hta:
+                return "Alto"
+            if pp >= 50:
+                return "Moderado"
+            return "Bajo"
         if vop > 13 or (vop > 10 and hta and edad >= 60):
             return "Muy Alto"
         if vop > 10 or pp >= 60 or hta:
@@ -328,7 +393,7 @@ class VascularEngine:
     @staticmethod
     def recomendaciones(fenotipo, riesgo, vop, pas, pad):
         recs = []
-        if "EVA" in fenotipo:
+        if str(fenotipo).startswith("EVA"):
             recs += [
                 "Control intensivo de presion arterial (objetivo < 130/80 mmHg).",
                 "Dieta DASH/mediterranea, reduccion de sodio (<5 g/dia).",
@@ -1103,9 +1168,14 @@ def construir_grafico_didactico(edad, sexo, vop, p10, p25, p50, p75, p90, color_
     ax.fill_between(edades, 0, cp10, color=COLOR_SUPERNOVA, alpha=0.12, label="SUPERNOVA (<p10)")
     ax.fill_between(edades, cp10, cp90, color=COLOR_NORMAL, alpha=0.10, label="HVA (p10-p90)")
     ax.fill_between(edades, cp90, cp90 * 1.6, color=COLOR_EVA, alpha=0.15, label="EVA (>p90)")
-    ax.axhline(10, color="#8B0000", lw=1.2, ls="--", alpha=0.72)
-    ax.text(21, 10.18, "VOP > 10 m/s = estimación vascular de riesgo elevada por rigidez arterial",
-            fontsize=6.8, color="#8B0000", fontweight="bold")
+    if 60 <= int(edad) <= 70:
+        ax.axhline(10, color="#8B0000", lw=1.0, ls="--", alpha=0.45)
+        ax.text(21, 10.18, "60-70 años: VOP ~10 m/s puede ser esperable; EVA solo si >p90",
+                fontsize=6.8, color="#8B0000", fontweight="bold")
+    else:
+        ax.axhline(10, color="#8B0000", lw=1.2, ls="--", alpha=0.72)
+        ax.text(21, 10.18, "VOP > 10 m/s = marcador de rigidez/LOB fuera del grupo 60-70",
+                fontsize=6.8, color="#8B0000", fontweight="bold")
     ax.plot(edades, cp50, color="#34495E", lw=1.9, label="p50")
     ax.plot(edades, cp25, color="#34495E", lw=0.9, ls=":", alpha=0.7, label="p25/p75")
     ax.plot(edades, cp75, color="#34495E", lw=0.9, ls=":", alpha=0.7)
@@ -1149,6 +1219,10 @@ def construir_grafico_didactico(edad, sexo, vop, p10, p25, p50, p75, p90, color_
         fenotipo_graf = "EVA"
         c_fen = COLOR_EVA
         rango_txt = "VOP > p90"
+    elif 60 <= int(edad) <= 70 and vop > p75:
+        fenotipo_graf = "RIGIDEZ +"
+        c_fen = "#E59866"
+        rango_txt = "p75 < VOP <= p90: aumentado para edad, no EVA"
     else:
         fenotipo_graf = "HVA"
         c_fen = COLOR_NORMAL
@@ -1161,7 +1235,11 @@ def construir_grafico_didactico(edad, sexo, vop, p10, p25, p50, p75, p90, color_
              fontsize=10, fontweight="bold", color="#34495E", transform=ax3.transAxes)
     ax3.text(0.5, 0.27, f"VOP CF medida: {vop} m/s", ha="center", va="center",
              fontsize=9.5, color="#34495E", transform=ax3.transAxes)
-    if vop > 10:
+    if 60 <= int(edad) <= 70:
+        ax3.text(0.5, 0.10, "En 60-70 años: interpretar por percentiles, no por corte fijo de 10 m/s",
+                 ha="center", va="center", fontsize=8.8, fontweight="bold",
+                 color="#8B0000", transform=ax3.transAxes)
+    elif vop > 10:
         ax3.text(0.5, 0.10, "Estimación vascular de riesgo elevada por VOP > 10 m/s",
                  ha="center", va="center", fontsize=9.2, fontweight="bold",
                  color=COLOR_EVA, transform=ax3.transAxes)
@@ -1232,7 +1310,7 @@ class PDFReport(FPDF):
         self.cell(0, 5, safe_latin1("LABORATORIO VASCULAR NO INVASIVO"), 0, 1, "L")
         self.set_font("Arial", "I", 7.8)
         self.set_x(12)
-        self.cell(0, 4, safe_latin1("Evaluación de Rigidez Arterial y Fenotipado Vascular - EVA/SUPERNOVA"), 0, 1, "L")
+        self.cell(0, 4, safe_latin1("Evaluación de Rigidez Arterial - Percentiles por Edad / EVA-SUPERNOVA"), 0, 1, "L")
         self.set_xy(150, 4)
         self.set_font("Arial", "", 7.2)
         self.cell(48, 4, safe_latin1(f"Folio: VAS-{datetime.datetime.now().strftime('%Y%m%d%H%M')}"), 0, 1, "R")
@@ -1295,8 +1373,10 @@ class PDFReport(FPDF):
             ("Presión de Pulso", f"{r['pp']} mmHg", "< 50 mmHg"),
             ("Presión Arterial Media", f"{r['pam']} mmHg", "70 - 105 mmHg"),
             ("Percentil 10", f"{r['p10']} m/s", "SUPERNOVA si VOP < p10"),
+            ("Percentil 75", f"{r.get('p75', '-')} m/s", "Alerta si VOP > p75"),
             ("Percentil 90", f"{r['p90']} m/s", "EVA si VOP > p90"),
-            ("Lesión Órgano Blanco", r["lob"], "VOP > 10 m/s"),
+            ("Patrón de rigidez vascular", r.get("patron_rigidez", "-"), "Por edad/percentiles"),
+            ("Lesión Órgano Blanco", r["lob"], "60-70: solo si >p90"),
             ("Estimación vascular de riesgo", r["riesgo"], "Estratificación clínica"),
         ]
         fill = False
@@ -1311,16 +1391,16 @@ class PDFReport(FPDF):
             fill = not fill
         self.ln(2)
 
-    def diagnostico_box(self, fenotipo, riesgo, vop=None):
+    def diagnostico_box(self, fenotipo, riesgo, vop=None, edad=None, p90=None, patron_rigidez=None):
         self.section_title("Conclusión Diagnóstica")
-        if "EVA" in fenotipo:
+        if str(fenotipo).startswith("EVA"):
             fill = COLOR_BG_ALERT; txt = (155, 30, 20)
         elif "SUPERNOVA" in fenotipo:
             fill = (217, 232, 252); txt = (28, 80, 140)
         else:
             fill = COLOR_BG_OK; txt = (28, 110, 60)
-        tiene_lob = vop is not None and vop > 10
-        alto = 18 if tiene_lob else 14
+        tiene_lob = (vop is not None and edad is not None and p90 is not None and VascularEngine.lob_por_rigidez(vop, edad, p90))
+        alto = 22 if patron_rigidez else (18 if tiene_lob else 14)
         y0 = self.get_y()
         self.set_fill_color(*fill)
         self.set_draw_color(*txt)
@@ -1332,15 +1412,16 @@ class PDFReport(FPDF):
         self.cell(0, 5, safe_latin1(f"Fenotipo vascular único: {fenotipo}"), 0, 1, "L")
         self.set_x(15)
         self.set_font("Arial", "B", 8.6)
-        if tiene_lob:
-            self.cell(0, 4.4, safe_latin1(f"Estimación vascular de riesgo: {riesgo} - elevada por VOP mayor a 10 m/seg"), 0, 1, "L")
-        else:
-            self.cell(0, 4.4, safe_latin1(f"Estimación vascular de riesgo: {riesgo}"), 0, 1, "L")
+        self.cell(0, 4.4, safe_latin1(f"Estimación vascular de riesgo: {riesgo}"), 0, 1, "L")
+        if patron_rigidez:
+            self.set_x(15)
+            self.set_font("Arial", "B", 8.0)
+            self.cell(0, 4.2, safe_latin1(f"Patrón de rigidez: {patron_rigidez}"), 0, 1, "L")
         if tiene_lob:
             self.set_x(15)
             self.set_text_color(155, 30, 20)
             self.set_font("Arial", "B", 8.1)
-            self.cell(0, 4.2, safe_latin1(f"LOB por rigidez vascular: VOP {vop} m/s > 10 m/s."), 0, 1, "L")
+            self.cell(0, 4.2, safe_latin1(f"LOB por rigidez vascular: VOP {vop} m/s > p90 ({p90} m/s)."), 0, 1, "L")
         self.set_y(y0 + alto + 3)
         self.set_text_color(0, 0, 0)
         self.set_draw_color(0, 0, 0)
@@ -1396,17 +1477,24 @@ class PDFReport(FPDF):
                     pass
         self.ln(2)
 
-    def interpretacion(self, fenotipo, vop, edad, edad_vasc, riesgo):
+    def interpretacion(self, fenotipo, vop, edad, edad_vasc, riesgo, p75=None, p90=None, patron_rigidez=None):
         self.section_title("Interpretación Clínica")
         self.set_font("Arial", "", 8.6)
         lob_txt = ""
-        if vop > 10:
-            lob_txt = "\n\nVOP > 10 m/s: lesión de órgano blanco por rigidez arterial."
+        if VascularEngine.es_grupo_60_70(edad):
+            if p90 is not None and vop > p90:
+                lob_txt = f"\n\nEn el grupo de 60-70 años, la VOP supera el percentilo 90 ({p90} m/s), por lo que se interpreta como rigidez vascular patológica para la edad."
+            else:
+                lob_txt = "\n\nEn pacientes de 60-70 años, una VOP cercana a 10 m/s puede corresponder al envejecimiento arterial fisiológico. No se informa EVA ni lesión de órgano blanco por el punto de corte fijo de 10 m/s; se prioriza la comparación con percentiles por edad."
+        elif vop > 10:
+            lob_txt = "\n\nVOP > 10 m/s: lesión de órgano blanco por rigidez arterial fuera del grupo 60-70 años."
 
-        if "EVA" in fenotipo:
+        if str(fenotipo).startswith("EVA"):
             def_fen = "Envejecimiento Vascular Acelerado: VOP por encima del percentil 90 para sexo y edad."
         elif "SUPERNOVA" in fenotipo:
             def_fen = "SUPERNOVA / Envejecimiento Vascular Supranormal: VOP carótido-femoral por debajo del percentil 10 para sexo y edad."
+        elif VascularEngine.es_grupo_60_70(edad):
+            def_fen = "Envejecimiento vascular fisiológico o rigidez aumentada no EVA: en 60-70 años la VOP se interpreta por percentiles; 10 m/s aislado no define EVA."
         else:
             def_fen = "HVA / Envejecimiento Vascular Saludable: VOP entre el percentil 10 y el percentil 90 para sexo y edad."
 
@@ -1415,6 +1503,7 @@ class PDFReport(FPDF):
             f"El diagnóstico de rigidez vascular se expresa como un fenotipo único, definido por la posición de la VOP frente a percentiles por edad y sexo.\n\n"
             f"Fenotipo vascular único: {fenotipo}.\n"
             f"{def_fen}\n\n"
+            f"Patrón de rigidez vascular: {patron_rigidez or 'No especificado'}.\n"
             f"Estimación vascular de riesgo: {riesgo}."
             f"{lob_txt}"
         )
@@ -1429,18 +1518,24 @@ class PDFReport(FPDF):
             self.multi_cell(0, 4.3, safe_latin1(f"{i}. {r}"))
         self.ln(2)
 
-    def cierre_medico(self, fenotipo, riesgo, vop=None):
+    def cierre_medico(self, fenotipo, riesgo, vop=None, edad=None, p90=None, patron_rigidez=None):
         self.section_title("Cierre Médico Integrado")
         self.set_font("Arial", "", 8.6)
-        if vop is not None and vop > 10:
+        if vop is not None and edad is not None and p90 is not None and VascularEngine.lob_por_rigidez(vop, edad, p90):
             riesgo_txt = (
                 f"Estimación vascular de riesgo consignado: {riesgo}. "
-                f"La estimación vascular de riesgo se considera elevada por VOP mayor a 10 m/seg."
+                f"La rigidez vascular se considera patológica para la edad por superar el percentilo 90."
+            )
+        elif vop is not None and VascularEngine.es_grupo_60_70(edad):
+            riesgo_txt = (
+                f"Estimación vascular de riesgo consignado: {riesgo}. "
+                f"En 60-70 años no se utiliza VOP > 10 m/s como criterio aislado de EVA; se prioriza el patrón por percentiles."
             )
         else:
             riesgo_txt = f"Estimación vascular de riesgo consignado: {riesgo}."
         txt = (
             f"Informe integrado de rigidez vascular con fenotipo final: {fenotipo}. "
+            f"Patrón de rigidez vascular: {patron_rigidez or 'No especificado'}. "
             f"La conducta clínica debe integrarse con presión arterial, antecedentes, daño de órgano blanco y criterio médico tratante. "
             f"{riesgo_txt}"
         )
@@ -1519,19 +1614,22 @@ def construir_pdf(datos, resultados, fenotipo, riesgo, recs, chart_buf, profesio
     pdf.add_page()
     pdf.patient_info(datos)
     pdf.resultados_table(resultados)
-    pdf.diagnostico_box(fenotipo, riesgo, vop=resultados.get("vop"))
+    pdf.diagnostico_box(fenotipo, riesgo, vop=resultados.get("vop"), edad=resultados.get("edad"),
+                        p90=resultados.get("p90"), patron_rigidez=resultados.get("patron_rigidez"))
     pdf.insert_imported_cf_curve(curva_cf_png)
 
     # Hoja 2: gráfico didáctico + interpretación.
     pdf.add_page()
     pdf.insert_chart(chart_buf)
     pdf.interpretacion(fenotipo, resultados["vop"], resultados["edad"],
-                       resultados["edad_vasc"], riesgo)
+                       resultados["edad_vasc"], riesgo, p75=resultados.get("p75"),
+                       p90=resultados.get("p90"), patron_rigidez=resultados.get("patron_rigidez"))
 
     # Hoja 3: recomendaciones + cierre + firma y sello con espacio suficiente.
     pdf.add_page()
     pdf.recomendaciones_clinicas(recs)
-    pdf.cierre_medico(fenotipo, riesgo, vop=resultados.get("vop"))
+    pdf.cierre_medico(fenotipo, riesgo, vop=resultados.get("vop"), edad=resultados.get("edad"),
+                       p90=resultados.get("p90"), patron_rigidez=resultados.get("patron_rigidez"))
     pdf.referencias_bibliograficas()
     pdf.firma()
 
@@ -1905,12 +2003,14 @@ def main():
                 vop = vop_calc
                 st.warning(f"No se detectó VOP cf medida en el archivo. Se usa recálculo desde distancia/tiempo: {vop} m/s")
             p10, p25, p50, p75, p90 = e.obtener_percentiles(edad, sexo)
-            fenotipo, color, _ = e.clasificar_fenotipo(vop, p10, p90)
+            fenotipo, color, _ = e.clasificar_fenotipo(vop, p10, p90, edad=edad, p75=p75)
             edad_vasc = e.edad_vascular(vop, sexo)
             pp = e.presion_pulso(pas, pad)
             pam = e.presion_arterial_media(pas, pad)
-            riesgo = e.estimacion_vascular_riesgo_global(vop, pas, pad, edad)
-            lob = "SI (VOP > 10 m/s)" if vop > 10 else "NO"
+            patron_rigidez = e.patron_rigidez_vascular(vop, edad, p75, p90)
+            riesgo = e.estimacion_vascular_riesgo_global(vop, pas, pad, edad, p75=p75, p90=p90)
+            lob_bool = e.lob_por_rigidez(vop, edad, p90)
+            lob = f"SI (VOP > p90: {p90} m/s)" if lob_bool else "NO"
             recs = e.recomendaciones(fenotipo, riesgo, vop, pas, pad)
 
             st.markdown(f"### Resultado: <span style='color:{color}'>{fenotipo}</span>",
@@ -1923,7 +2023,8 @@ def main():
             c5, c6, c7 = st.columns(3)
             c5.metric("Presion de Pulso", f"{pp} mmHg")
             c6.metric("PAM", f"{pam} mmHg")
-            c7.metric("LOB (VOP>10)", lob)
+            c7.metric("LOB por rigidez", lob)
+            st.info(patron_rigidez)
 
             try:
                 chart_buf = construir_grafico_didactico(
@@ -1940,8 +2041,9 @@ def main():
                          "edad": edad, "sexo": sexo,
                          "medico_solicitante": medico_solicitante}
                 res = {"vop": vop, "pas": pas, "pad": pad, "pp": pp, "pam": pam,
-                       "p10": p10, "p50": p50, "p90": p90, "lob": lob,
-                       "edad": edad, "edad_vasc": edad_vasc, "riesgo": riesgo}
+                       "p10": p10, "p50": p50, "p75": p75, "p90": p90, "lob": lob,
+                       "edad": edad, "edad_vasc": edad_vasc, "riesgo": riesgo,
+                       "patron_rigidez": patron_rigidez}
                 perfil_pdf = _perfil_usuario_actual(st.session_state.get("username", ""))
                 pdf_bytes = construir_pdf(datos, res, fenotipo, riesgo, recs,
                                           chart_buf, profesional, ram.get("_curva_cf_png"),
@@ -1989,9 +2091,11 @@ def main():
                 "p90_ms": p90,
                 "edad_vascular": edad_vasc,
                 "fenotipo_vascular_unico": fenotipo,
+                "patron_rigidez_vascular": patron_rigidez,
                 "estimacion_vascular_riesgo": riesgo,
-                "lob_vop_mayor_10": "SI" if vop > 10 else "NO",
-                "estimacion_vascular_elevada_por_vop_mayor_10": "SI" if vop > 10 else "NO",
+                "lob_por_rigidez_vascular": "SI" if lob_bool else "NO",
+                "lob_vop_mayor_10": "NO APLICA 60-70" if e.es_grupo_60_70(edad) else ("SI" if vop > 10 else "NO"),
+                "estimacion_vascular_elevada_por_vop_mayor_10": "NO APLICA 60-70" if e.es_grupo_60_70(edad) else ("SI" if vop > 10 else "NO"),
                 "fuente_vop": fuente_vop,
                 "archivo_importado": st.session_state.get("archivo_importado_nombre", ""),
             }
