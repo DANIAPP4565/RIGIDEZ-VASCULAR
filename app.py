@@ -46,16 +46,14 @@ try:
 except ImportError:
     _MISSING.append("fpdf2")
 
-# Modulo local de gestion de usuarios (users.py debe estar al lado de app.py)
+# MODO DIRECTO SIN USUARIO/CONTRASEÑA
+# Se elimina la dependencia funcional de users.py. La app trabaja con un
+# usuario interno fijo para conservar firma/sello, historial y exportaciones.
 UserStore = None
 _USERS = None
-_USER_ERR = ""
-try:
-    from users import UserStore as _US
-    UserStore = _US
-    _USERS = UserStore()
-except Exception as _e:
-    _USER_ERR = f"{type(_e).__name__}: {_e}"
+_USER_ERR = "Gestión de usuarios deshabilitada por configuración de acceso directo."
+DEFAULT_USERNAME = "modo_directo"
+DEFAULT_ROLE = "local"
 
 if _MISSING:
     st.set_page_config(page_title="Faltan dependencias", layout="centered")
@@ -150,7 +148,7 @@ def _usuario_seguro(username: str) -> str:
 
 
 def _guardar_asset_usuario(username: str, uploaded_file, tipo: str):
-    """Guarda firma/sello en carpeta aislada por usuario autenticado/registrado."""
+    """Guarda firma/sello en carpeta local del modo directo."""
     if uploaded_file is None:
         return None
     tipo = "sello" if tipo == "sello" else "firma"
@@ -167,7 +165,7 @@ def _guardar_asset_usuario(username: str, uploaded_file, tipo: str):
 
 
 def _asset_usuario(username: str, tipo: str):
-    """Devuelve la ruta del asset del usuario, si existe. Nunca usa assets de otro usuario."""
+    """Devuelve la ruta del asset local del modo directo, si existe."""
     tipo = "sello" if tipo == "sello" else "firma"
     user_dir = os.path.join(USER_ASSETS_DIR, _usuario_seguro(username))
     for ext in (".png", ".jpg", ".jpeg"):
@@ -194,9 +192,8 @@ def _asegurar_data_dir():
 def _guardar_registro_paciente(registro: dict):
     """Guarda un registro clínico en JSONL persistente.
 
-    Cada línea pertenece a un paciente evaluado y queda asociada al usuario
-    autenticado. Un médico solo exporta sus registros; el administrador exporta
-    todos los usuarios.
+    Cada línea pertenece a un paciente evaluado y queda almacenada en la
+    base histórica local de la app.
     """
     _asegurar_data_dir()
     reg = dict(registro or {})
@@ -221,9 +218,10 @@ def _cargar_registros_pacientes():
     return registros
 
 
-def _df_registros(usuario_actual: str, rol: str):
+def _df_registros(usuario_actual: str = DEFAULT_USERNAME, rol: str = DEFAULT_ROLE):
     registros = _cargar_registros_pacientes()
-    if rol != "admin":
+    # En modo directo no hay separación por cuentas: se muestra/exporta toda la base local.
+    if rol not in ("admin", "local", DEFAULT_ROLE):
         u = _usuario_seguro(usuario_actual)
         registros = [r for r in registros if r.get("usuario_id") == u]
     if not registros:
@@ -1638,124 +1636,26 @@ def construir_pdf(datos, resultados, fenotipo, recs, chart_buf, profesional, cur
 # INTERFAZ STREAMLIT
 # ---------------------------------------------------------------------------
 def main():
-    if "auth" not in st.session_state:
-        st.session_state.auth = False
+    # Acceso directo: sin pantalla de usuario, contraseña, registro ni recuperación.
+    # Se mantiene un usuario interno fijo para que firma/sello e historial sigan funcionando.
+    st.session_state.auth = True
+    st.session_state.username = DEFAULT_USERNAME
+    st.session_state.user_role = DEFAULT_ROLE
 
-    if not st.session_state.auth:
-        st.title("🔐 Acceso Médico")
-        if _USERS is None:
-            st.error("No se pudo inicializar la gestión de usuarios.")
-            st.code(f"Detalle del error: {_USER_ERR}")
-            st.markdown(
-                "**Diagnóstico rápido:**\n\n"
-                "1. Verifique que `users.py` esté en la misma carpeta que `app.py`.\n"
-                "2. Verifique su versión de Python: requiere **Python 3.8 o superior**.\n"
-                "   En la consola ejecute `python --version`.\n"
-                "3. Si la carpeta es de solo lectura (ej. Google Drive sincronizado), "
-                "mueva `app.py` y `users.py` a una carpeta local con permisos de escritura."
-            )
-            return
-
-        tab_login, tab_reg, tab_rec = st.tabs(
-            ["Iniciar sesión", "Registrarse", "Recuperar contraseña"]
-        )
-
-        # --- Tab 1: Login ---
-        with tab_login:
-            user = st.text_input("Usuario", key="login_user")
-            pw = st.text_input("Contraseña", type="password", key="login_pw")
-            if st.button("Ingresar", key="btn_login"):
-                ok, role_or_msg = _USERS.verificar(user, pw)
-                if ok:
-                    st.session_state.auth = True
-                    st.session_state.user_role = role_or_msg
-                    st.session_state.username = user.strip().lower()
-                    st.rerun()
-                else:
-                    st.error(role_or_msg)
-
-        # --- Tab 2: Registrarse ---
-        with tab_reg:
-            st.caption("Cree una cuenta médica nueva. La pregunta de "
-                       "seguridad le servirá para recuperar la contraseña.")
-            r_user = st.text_input("Nuevo usuario (alfanumérico, mín. 3)",
-                                   key="reg_user")
-            r_nombre = st.text_input("Nombre completo", key="reg_nombre")
-            r_matricula = st.text_input("Matrícula profesional (opcional)",
-                                        key="reg_matricula")
-            r_pw = st.text_input("Contraseña (mín. 8 caracteres)",
-                                 type="password", key="reg_pw")
-            r_pw2 = st.text_input("Repita la contraseña",
-                                  type="password", key="reg_pw2")
-            r_q = st.text_input("Pregunta de seguridad",
-                                placeholder="Ej.: Nombre de su primera mascota",
-                                key="reg_q")
-            r_a = st.text_input("Respuesta a la pregunta",
-                                key="reg_a")
-            st.markdown("**Firma y sello digital (opcional)**")
-            st.caption("Estos archivos quedan asociados exclusivamente a este usuario y solo se insertan en sus propios informes PDF.")
-            r_firma = st.file_uploader("Cargar firma digital", type=["png", "jpg", "jpeg"], key="reg_firma")
-            r_sello = st.file_uploader("Cargar sello digital", type=["png", "jpg", "jpeg"], key="reg_sello")
-            if st.button("Crear cuenta", key="btn_reg"):
-                if r_pw != r_pw2:
-                    st.error("Las contraseñas no coinciden.")
-                else:
-                    ok, msg = _USERS.registrar(
-                        r_user, r_pw, r_q, r_a,
-                        role="medico",
-                        nombre_completo=r_nombre,
-                        matricula=r_matricula,
-                    )
-                    if ok:
-                        try:
-                            _guardar_asset_usuario(r_user, r_firma, "firma")
-                            _guardar_asset_usuario(r_user, r_sello, "sello")
-                        except Exception as exc:
-                            st.warning(f"La cuenta fue creada, pero no se pudo guardar firma/sello: {exc}")
-                        st.success(msg)
-                    else:
-                        st.error(msg)
-
-        # --- Tab 3: Recuperar contraseña ---
-        with tab_rec:
-            st.caption("Ingrese su usuario para ver su pregunta de seguridad. "
-                       "Luego responda y elija una contraseña nueva.")
-            rc_user = st.text_input("Usuario", key="rec_user")
-            if rc_user and _USERS.existe(rc_user):
-                pregunta = _USERS.obtener_pregunta(rc_user)
-                st.info(f"Pregunta de seguridad: **{pregunta}**")
-                rc_a = st.text_input("Su respuesta", key="rec_a")
-                rc_pw = st.text_input("Nueva contraseña (mín. 8)",
-                                      type="password", key="rec_pw")
-                rc_pw2 = st.text_input("Repita la nueva contraseña",
-                                       type="password", key="rec_pw2")
-                if st.button("Restablecer contraseña", key="btn_rec"):
-                    if rc_pw != rc_pw2:
-                        st.error("Las contraseñas no coinciden.")
-                    else:
-                        ok, msg = _USERS.recuperar(rc_user, rc_a, rc_pw)
-                        if ok:
-                            st.success(msg)
-                        else:
-                            st.error(msg)
-            elif rc_user:
-                st.warning("Usuario no encontrado.")
-        return
-
-    st.sidebar.title(f"Bienvenido, {st.session_state.user_role.capitalize()}")
+    st.sidebar.title("Modo directo")
     profesional = st.sidebar.text_input("Profesional responsable",
                                         value="Dr. / Dra. ____________________")
     usuario_actual = st.session_state.get("username", "")
     perfil_actual = _perfil_usuario_actual(usuario_actual)
-    with st.sidebar.expander("Firma y sello digital del usuario"):
+    with st.sidebar.expander("Firma y sello digital"):
         if perfil_actual.get("firma_path"):
             st.image(perfil_actual["firma_path"], caption="Firma cargada", width=120)
         else:
-            st.caption("Sin firma cargada para este usuario.")
+            st.caption("Sin firma cargada.")
         if perfil_actual.get("sello_path"):
             st.image(perfil_actual["sello_path"], caption="Sello cargado", width=100)
         else:
-            st.caption("Sin sello cargado para este usuario.")
+            st.caption("Sin sello cargado.")
         up_firma = st.file_uploader("Actualizar firma", type=["png", "jpg", "jpeg"], key="up_firma_usuario")
         up_sello = st.file_uploader("Actualizar sello", type=["png", "jpg", "jpeg"], key="up_sello_usuario")
         if st.button("Guardar firma/sello", key="btn_guardar_assets_usuario"):
@@ -1764,46 +1664,13 @@ def main():
                     _guardar_asset_usuario(usuario_actual, up_firma, "firma")
                 if up_sello is not None:
                     _guardar_asset_usuario(usuario_actual, up_sello, "sello")
-                st.success("Firma/sello guardados para este usuario.")
+                st.success("Firma/sello guardados.")
                 st.rerun()
             except Exception as exc:
                 st.error(f"No se pudo guardar firma/sello: {exc}")
         perfil_actual = _perfil_usuario_actual(usuario_actual)
-    if st.sidebar.button("Cerrar Sesión"):
-        st.session_state.auth = False
-        st.rerun()
-
     menu = ["Nuevo Estudio", "Historial y Exportación"]
-    if st.session_state.get("user_role") == "admin":
-        menu.append("Administrar Usuarios")
     choice = st.sidebar.selectbox("Menú", menu)
-
-    # --- Panel de administración de usuarios ---
-    if choice == "Administrar Usuarios":
-        st.header("👥 Administración de Usuarios")
-        if _USERS is None:
-            st.error("Gestión de usuarios no disponible.")
-            return
-        st.subheader("Usuarios registrados")
-        st.write(_USERS.lista_usuarios())
-
-        st.subheader("Resetear contraseña de un usuario")
-        target = st.selectbox("Usuario objetivo", _USERS.lista_usuarios(),
-                              key="adm_target")
-        adm_pw = st.text_input("Su contraseña de admin (confirmación)",
-                               type="password", key="adm_pw")
-        new_pw = st.text_input("Nueva contraseña (mín. 8 caracteres)",
-                               type="password", key="adm_newpw")
-        if st.button("Aplicar reset", key="btn_admreset"):
-            ok, msg = _USERS.admin_reset(
-                st.session_state.get("username", "admin"),
-                adm_pw, target, new_pw,
-            )
-            if ok:
-                st.success(msg)
-            else:
-                st.error(msg)
-        return
 
     if choice == "Nuevo Estudio":
         st.header("📋 Registro de Evaluación Vascular")
@@ -2086,19 +1953,15 @@ def main():
             }
             try:
                 _guardar_registro_paciente(registro)
-                st.success("Registro guardado en la base histórica del usuario.")
+                st.success("Registro guardado en la base histórica local.")
             except Exception as exc:
                 st.warning(f"El informe se generó, pero no se pudo guardar el registro histórico: {exc}")
 
     elif choice == "Historial y Exportación":
         rol = st.session_state.get("user_role", "medico")
         usuario = st.session_state.get("username", "")
-        if rol == "admin":
-            st.header("Gestión de Datos - Administrador")
-            st.caption("Vista global: incluye pacientes registrados por todos los usuarios.")
-        else:
-            st.header("Mis pacientes - Exportación Excel")
-            st.caption("Vista individual: incluye solo los pacientes cargados por el usuario actual.")
+        st.header("Historial local - Exportación Excel")
+        st.caption("Vista global en modo directo: incluye todos los pacientes registrados en esta base local.")
 
         df = _df_registros(usuario, rol)
         if not df.empty:
@@ -2108,12 +1971,8 @@ def main():
                 st.dataframe(df)
 
             excel_data = _excel_bytes_registros(df, "Pacientes_VOP")
-            if rol == "admin":
-                label = "Excel: exportar pacientes de TODOS los usuarios"
-                fname = f"Base_VOP_Todos_los_Usuarios_{datetime.date.today()}.xlsx"
-            else:
-                label = "Excel: exportar mis pacientes"
-                fname = f"Base_VOP_{_usuario_seguro(usuario)}_{datetime.date.today()}.xlsx"
+            label = "Excel: exportar base local completa"
+            fname = f"Base_VOP_Local_{datetime.date.today()}.xlsx"
             st.download_button(
                 label=label,
                 data=excel_data,
@@ -2121,23 +1980,6 @@ def main():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
-            if rol == "admin":
-                st.subheader("Resumen por usuario")
-                resumen = (
-                    df.groupby("usuario", dropna=False)
-                    .agg(pacientes=("paciente", "count"), vop_promedio=("vop_cf_ms", "mean"))
-                    .reset_index()
-                )
-                try:
-                    st.dataframe(resumen, use_container_width=True)
-                except TypeError:
-                    st.dataframe(resumen)
-                st.download_button(
-                    label="Excel: exportar resumen por usuario",
-                    data=_excel_bytes_registros(resumen, "Resumen_Usuarios"),
-                    file_name=f"Resumen_VOP_Usuarios_{datetime.date.today()}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
         else:
             st.info("No hay registros disponibles para exportar.")
 
