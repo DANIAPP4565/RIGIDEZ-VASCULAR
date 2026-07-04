@@ -1107,6 +1107,57 @@ def safe_latin1(t):
     return t.encode("latin-1", "ignore").decode("latin-1")
 
 
+def _sanitizar_componente_archivo(valor, fallback="SD"):
+    """Limpia un componente del nombre de archivo sin eliminar comas ni espacios."""
+    txt = str(valor or "").strip()
+    if not txt:
+        txt = fallback
+    txt = re.sub(r'[<>:"/\\|?*]+', "-", txt)
+    txt = re.sub(r"\s+", " ", txt).strip(" .,-")
+    return txt or fallback
+
+
+def _apellido_nombre_para_archivo(nombre_completo):
+    """Devuelve 'APELLIDO, NOMBRE' para el nombre del PDF.
+
+    Si el usuario ya ingresó una coma, se respeta. En caso contrario se toma
+    el primer término como apellido y el resto como nombre.
+    """
+    txt = _sanitizar_componente_archivo(nombre_completo, "PACIENTE")
+    if "," in txt:
+        apellido, nombres = [x.strip() for x in txt.split(",", 1)]
+    else:
+        partes = txt.split()
+        apellido = partes[0] if partes else "PACIENTE"
+        nombres = " ".join(partes[1:]) if len(partes) > 1 else "SD"
+    apellido = _sanitizar_componente_archivo(apellido, "PACIENTE").upper()
+    nombres = _sanitizar_componente_archivo(nombres, "SD").upper()
+    return f"{apellido}, {nombres}"
+
+
+def _fecha_estudio_para_archivo(fecha_estudio):
+    """Formatea la fecha como DD-MM-AAAA, compatible con Windows."""
+    if isinstance(fecha_estudio, datetime.datetime):
+        fecha_estudio = fecha_estudio.date()
+    if isinstance(fecha_estudio, datetime.date):
+        return fecha_estudio.strftime("%d-%m-%Y")
+    txt = str(fecha_estudio or "").strip()
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return datetime.datetime.strptime(txt, fmt).strftime("%d-%m-%Y")
+        except Exception:
+            pass
+    return _sanitizar_componente_archivo(txt, "SIN-FECHA")
+
+
+def _nombre_pdf_vop(nombre_completo, fecha_estudio, obra_social):
+    """Formato solicitado: APELLIDO, NOMBRE, FECHA DEL ESTUDIO, VOP, OBRA SOCIAL.pdf"""
+    paciente = _apellido_nombre_para_archivo(nombre_completo)
+    fecha = _fecha_estudio_para_archivo(fecha_estudio)
+    cobertura = _sanitizar_componente_archivo(obra_social, "SIN OBRA SOCIAL").upper()
+    return f"{paciente}, {fecha}, VOP, {cobertura}.pdf"
+
+
 # ---------------------------------------------------------------------------
 # GRÁFICA DIDÁCTICA PROFESIONAL
 # ---------------------------------------------------------------------------
@@ -1316,11 +1367,16 @@ class PDFReport(FPDF):
     def patient_info(self, datos):
         self.section_title("Datos del Paciente")
         self.set_fill_color(*COLOR_BG_SECTION)
+        fecha_estudio = datos.get("fecha_estudio") or datetime.date.today()
+        if isinstance(fecha_estudio, (datetime.date, datetime.datetime)):
+            fecha_estudio_txt = fecha_estudio.strftime("%d/%m/%Y")
+        else:
+            fecha_estudio_txt = str(fecha_estudio)
         filas = [
             ("Nombre", datos.get("nombre", "-"), "Documento", datos.get("documento", "-")),
             ("Edad", f"{datos.get('edad', '-')} años", "Sexo", datos.get("sexo", "-")),
-            ("Médico solicitante", datos.get("medico_solicitante", "-"),
-             "Fecha del estudio", datetime.date.today().strftime("%d/%m/%Y")),
+            ("Obra social", datos.get("obra_social", "-"), "Fecha del estudio", fecha_estudio_txt),
+            ("Médico solicitante", datos.get("medico_solicitante", "-"), "", ""),
         ]
         for f in filas:
             self.set_font("Arial", "B", 8.2)
@@ -1764,6 +1820,7 @@ def main():
         defaults = {
             "f_nombre": "", "f_documento": "", "f_edad": 50,
             "f_sexo": "Masculino", "f_medsol": "",
+            "f_fecha_estudio": datetime.date.today(), "f_obra_social": "",
             # No usar valores fisiológicos ficticios como default: si el PDF no importa, queda 0 y se obliga a revisar.
             "f_pas": 0, "f_pad": 0,
             "f_distancia": 0.0, "f_tiempo": 0.0,
@@ -1785,6 +1842,8 @@ def main():
                 st.radio("Sexo", ["Masculino", "Femenino"], key="f_sexo",
                          horizontal=True)
                 st.text_input("Médico solicitante", key="f_medsol")
+                st.date_input("Fecha del estudio", key="f_fecha_estudio", format="DD/MM/YYYY")
+                st.text_input("Obra social", key="f_obra_social")
             with col2:
                 st.number_input("Presión Sistólica (PAS, mmHg)",
                                 min_value=0, max_value=260, step=1, key="f_pas")
@@ -1813,6 +1872,8 @@ def main():
         edad = int(st.session_state["f_edad"])
         sexo = st.session_state["f_sexo"]
         medico_solicitante = st.session_state["f_medsol"]
+        fecha_estudio = st.session_state.get("f_fecha_estudio", datetime.date.today())
+        obra_social = st.session_state.get("f_obra_social", "")
         pas = int(st.session_state["f_pas"])
         pad = int(st.session_state["f_pad"])
         distancia = float(st.session_state["f_distancia"])
@@ -1892,7 +1953,9 @@ def main():
                 datos = {"nombre": nombre or "Sin nombre",
                          "documento": documento,
                          "edad": edad, "sexo": sexo,
-                         "medico_solicitante": medico_solicitante}
+                         "medico_solicitante": medico_solicitante,
+                         "fecha_estudio": fecha_estudio,
+                         "obra_social": obra_social}
                 res = {"vop": vop, "pas": pas, "pad": pad, "pp": pp, "pam": pam,
                        "p10": p10, "p50": p50, "p75": p75, "p90": p90, "lob": lob,
                        "edad": edad, "edad_vasc": edad_vasc,
@@ -1903,11 +1966,15 @@ def main():
                                           firma_path=perfil_pdf.get("firma_path"),
                                           sello_path=perfil_pdf.get("sello_path"))
 
+                nombre_archivo_pdf = _nombre_pdf_vop(
+                    nombre_completo=nombre,
+                    fecha_estudio=fecha_estudio,
+                    obra_social=obra_social,
+                )
                 st.download_button(
                     "Descargar Informe PDF Profesional",
                     data=pdf_bytes,
-                    file_name=f"Informe_Vascular_{(nombre or 'paciente').replace(' ', '_')}_"
-                              f"{datetime.date.today()}.pdf",
+                    file_name=nombre_archivo_pdf,
                     mime="application/pdf",
                 )
             except Exception as exc:
@@ -1921,7 +1988,8 @@ def main():
             fuente_vop = "VOP cf medida" if vop_medida > 0 else "VOP cf recalculada desde distancia/tiempo"
             registro = {
                 "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
-                "fecha_estudio": str(datetime.date.today()),
+                "fecha_estudio": str(fecha_estudio),
+                "obra_social": obra_social,
                 "usuario": usuario_sesion,
                 "usuario_id": _usuario_seguro(usuario_sesion),
                 "rol": rol_sesion,
