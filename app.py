@@ -11,6 +11,7 @@ import re
 import sys
 import traceback
 import unicodedata
+import zipfile
 from io import BytesIO
 
 # ---- Imports con manejo amigable de errores ----
@@ -151,7 +152,7 @@ def _guardar_asset_usuario(username: str, uploaded_file, tipo: str):
     """Guarda firma/sello en carpeta local del modo directo."""
     if uploaded_file is None:
         return None
-    tipo = "sello" if tipo == "sello" else "firma"
+    tipo = tipo if tipo in ("firma", "sello", "logo") else "firma"
     user_dir = os.path.join(USER_ASSETS_DIR, _usuario_seguro(username))
     os.makedirs(user_dir, exist_ok=True)
     ext = os.path.splitext(getattr(uploaded_file, "name", ""))[1].lower()
@@ -166,7 +167,7 @@ def _guardar_asset_usuario(username: str, uploaded_file, tipo: str):
 
 def _asset_usuario(username: str, tipo: str):
     """Devuelve la ruta del asset local del modo directo, si existe."""
-    tipo = "sello" if tipo == "sello" else "firma"
+    tipo = tipo if tipo in ("firma", "sello", "logo") else "firma"
     user_dir = os.path.join(USER_ASSETS_DIR, _usuario_seguro(username))
     for ext in (".png", ".jpg", ".jpeg"):
         path = os.path.join(user_dir, f"{tipo}{ext}")
@@ -177,6 +178,7 @@ def _asset_usuario(username: str, tipo: str):
 
 def _perfil_usuario_actual(username: str):
     return {
+        "logo_path": _asset_usuario(username, "logo"),
         "firma_path": _asset_usuario(username, "firma"),
         "sello_path": _asset_usuario(username, "sello"),
     }
@@ -1316,9 +1318,10 @@ class PDFReport(FPDF):
     Hoja 2: lámina didáctica e interpretación clínica.
     Hoja 3: recomendaciones, cierre médico, firma y sello digital con espacio suficiente.
     """
-    def __init__(self, profesional="", firma_path=None, sello_path=None):
+    def __init__(self, profesional="", logo_path=None, firma_path=None, sello_path=None):
         super().__init__(orientation="P", unit="mm", format="A4")
         self.profesional = profesional or "Profesional Responsable"
+        self.logo_path = logo_path
         self.firma_path = firma_path
         self.sello_path = sello_path
         # Se usa salto automático moderado. La distribución principal se controla manualmente
@@ -1331,11 +1334,18 @@ class PDFReport(FPDF):
         self.set_fill_color(*COLOR_BG_HEADER)
         self.rect(0, 0, 210, 18, "F")
         self.set_text_color(255, 255, 255)
+        titulo_x = 12
+        try:
+            if self.logo_path and os.path.exists(self.logo_path):
+                self.image(self.logo_path, x=12, y=2.0, w=15, h=14)
+                titulo_x = 31
+        except Exception:
+            titulo_x = 12
         self.set_font("Arial", "B", 11.5)
-        self.set_xy(12, 4)
+        self.set_xy(titulo_x, 4)
         self.cell(0, 5, safe_latin1("LABORATORIO VASCULAR NO INVASIVO"), 0, 1, "L")
         self.set_font("Arial", "I", 7.8)
-        self.set_x(12)
+        self.set_x(titulo_x)
         self.cell(0, 4, safe_latin1("Evaluación de Rigidez Arterial - Percentiles por Edad / EVA-SUPERNOVA"), 0, 1, "L")
         self.set_xy(150, 4)
         self.set_font("Arial", "", 7.2)
@@ -1648,8 +1658,8 @@ class PDFReport(FPDF):
         self.cell(80, 4.2, safe_latin1("Médico responsable del estudio"), 0, 1, "C")
 
 
-def construir_pdf(datos, resultados, fenotipo, recs, chart_buf, profesional, curva_cf_png=None, firma_path=None, sello_path=None):
-    pdf = PDFReport(profesional=profesional, firma_path=firma_path, sello_path=sello_path)
+def construir_pdf(datos, resultados, fenotipo, recs, chart_buf, profesional, curva_cf_png=None, logo_path=None, firma_path=None, sello_path=None):
+    pdf = PDFReport(profesional=profesional, logo_path=logo_path, firma_path=firma_path, sello_path=sello_path)
 
     # Hoja 1: resumen clínico + evidencia original CF.
     pdf.add_page()
@@ -1688,6 +1698,412 @@ def construir_pdf(datos, resultados, fenotipo, recs, chart_buf, profesional, cur
         return out.encode("latin-1")
     return bytes(out)
 
+
+# ---------------------------------------------------------------------------
+# PROCESAMIENTO MASIVO DE INFORMES VOP
+# ---------------------------------------------------------------------------
+class _NamedBytesIO(BytesIO):
+    """BytesIO con nombre de archivo, compatible con el parser individual."""
+    def __init__(self, data: bytes, name: str):
+        super().__init__(data)
+        self.name = name or "estudio_vop.pdf"
+
+
+def _fecha_desde_texto_vop(texto: str):
+    """Busca una fecha de estudio explícitamente rotulada en el informe."""
+    texto = str(texto or "")
+    patrones = [
+        r"(?:Fecha\s+del\s+Estudio|Fecha\s+Estudio|Fecha\s+de\s+Medici[oó]n)\s*[:=\-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+        r"(?:Study\s+Date)\s*[:=\-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+        r"(?:Fecha\s+del\s+Estudio|Fecha\s+Estudio)\s*[:=\-]?\s*(\d{4}[/-]\d{1,2}[/-]\d{1,2})",
+    ]
+    for pat in patrones:
+        m = re.search(pat, texto, flags=re.IGNORECASE)
+        if not m:
+            continue
+        valor = m.group(1)
+        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d-%m-%y", "%Y-%m-%d", "%Y/%m/%d"):
+            try:
+                return datetime.datetime.strptime(valor, fmt).date()
+            except Exception:
+                pass
+    return None
+
+
+def _campo_textual_desde_informe(texto: str, etiquetas, max_len=100):
+    texto = str(texto or "")
+    etiqueta = "|".join(etiquetas)
+    pat = rf"(?:{etiqueta})\s*[:=\-]?\s*([^\n\r|]{{2,{max_len}}})"
+    m = re.search(pat, texto, flags=re.IGNORECASE)
+    if not m:
+        return ""
+    valor = re.split(
+        r"\b(?:Edad|Sexo|DNI|Documento|Fecha|PAS|PAD|VOP|PWV|TCF|Distancia|Dist\.)\b",
+        m.group(1), maxsplit=1, flags=re.IGNORECASE
+    )[0]
+    return re.sub(r"\s+", " ", valor).strip(" :-|,.;")[:max_len]
+
+
+def _metadatos_adicionales_vop(parsed: dict, fecha_respaldo, obra_social_respaldo="", medico_respaldo=""):
+    texto = parsed.get("_texto_crudo", "") if isinstance(parsed, dict) else ""
+    fecha = _fecha_desde_texto_vop(texto) or fecha_respaldo or datetime.date.today()
+    obra_social = _campo_textual_desde_informe(
+        texto, [r"Obra\s+Social", r"Cobertura", r"Seguro\s+M[eé]dico", r"Health\s+Insurance"], 90
+    ) or obra_social_respaldo
+    medico = _campo_textual_desde_informe(
+        texto, [r"M[eé]dico\s+Solicitante", r"M[eé]dico\s+Tratante", r"Profesional\s+Solicitante"], 90
+    ) or medico_respaldo
+    return fecha, obra_social, medico
+
+
+def _nombre_unico_lote(nombre: str, usados: set):
+    """Evita sobreescritura: agrega (2), (3), etc. antes de la extensión."""
+    nombre = _sanitizar_componente_archivo(nombre, "INFORME VOP.pdf")
+    if not nombre.lower().endswith(".pdf"):
+        nombre += ".pdf"
+    base, ext = os.path.splitext(nombre)
+    candidato = nombre
+    n = 2
+    while candidato.casefold() in usados:
+        candidato = f"{base} ({n}){ext}"
+        n += 1
+    usados.add(candidato.casefold())
+    return candidato
+
+
+def _registro_vop_desde_resultado(datos, resultados, fenotipo, archivo_importado, fuente_vop,
+                                   distancia, tiempo, usuario, rol):
+    e = VascularEngine()
+    vop = resultados["vop"]
+    edad = resultados["edad"]
+    p90 = resultados["p90"]
+    lob_bool = e.lob_por_rigidez(vop, edad, p90)
+    return {
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "fecha_estudio": str(datos.get("fecha_estudio", "")),
+        "obra_social": datos.get("obra_social", ""),
+        "usuario": usuario,
+        "usuario_id": _usuario_seguro(usuario),
+        "rol": rol,
+        "paciente": datos.get("nombre", ""),
+        "documento": datos.get("documento", ""),
+        "edad": edad,
+        "sexo": datos.get("sexo", ""),
+        "medico_solicitante": datos.get("medico_solicitante", ""),
+        "vop_cf_ms": vop,
+        "distancia_cf_cm": distancia,
+        "tiempo_transito_cf_ms": tiempo,
+        "pas_mmhg": resultados["pas"],
+        "pad_mmhg": resultados["pad"],
+        "pam_mmhg": resultados["pam"],
+        "pp_mmhg": resultados["pp"],
+        "p10_ms": resultados["p10"],
+        "p25_ms": resultados.get("p25"),
+        "p50_ms": resultados["p50"],
+        "p75_ms": resultados["p75"],
+        "p90_ms": resultados["p90"],
+        "edad_vascular": resultados["edad_vasc"],
+        "fenotipo_rigidez_vascular": fenotipo,
+        "fenotipo_vascular_unico": fenotipo,
+        "patron_rigidez_vascular": resultados.get("patron_rigidez", fenotipo),
+        "lob_por_rigidez_vascular": "SI" if lob_bool else "NO",
+        "lob_vop_mayor_10": "NO APLICA 60-70" if e.es_grupo_60_70(edad) else ("SI" if vop > 10 else "NO"),
+        "fuente_vop": fuente_vop,
+        "archivo_importado": archivo_importado,
+    }
+
+
+def _procesar_pdf_vop_lote(pdf_bytes: bytes, archivo_nombre: str, profesional: str, perfil_pdf: dict,
+                            fecha_respaldo, obra_social_respaldo="", medico_respaldo="",
+                            exigir_curva=True):
+    """Procesa un PDF de manera aislada y devuelve informe, registro y datos de control."""
+    archivo = _NamedBytesIO(pdf_bytes, archivo_nombre)
+    parsed = GenericReportParser.parsear(archivo)
+
+    nombre = str(parsed.get("nombre") or "").strip()
+    documento = str(parsed.get("documento") or "").strip()
+    edad = parsed.get("edad")
+    sexo = parsed.get("sexo")
+    pas = parsed.get("pas")
+    pad = parsed.get("pad")
+    distancia = parsed.get("distancia")
+    tiempo = parsed.get("tiempo")
+    vop_medida = parsed.get("vop")
+
+    faltantes = []
+    if not nombre:
+        faltantes.append("nombre del paciente")
+    try:
+        edad = int(edad)
+        if not (1 <= edad <= 120):
+            raise ValueError
+    except Exception:
+        faltantes.append("edad válida")
+    if sexo not in ("Masculino", "Femenino"):
+        faltantes.append("sexo")
+    try:
+        pas = int(round(float(pas)))
+        pad = int(round(float(pad)))
+        if not (70 <= pas <= 260 and 30 <= pad <= 160 and pas > pad):
+            raise ValueError
+    except Exception:
+        faltantes.append("PAS/PAD válidas")
+    try:
+        distancia = float(distancia)
+        if not (20 <= distancia <= 200):
+            raise ValueError
+    except Exception:
+        faltantes.append("Dist. Car. Fem. válida")
+    try:
+        tiempo = float(tiempo)
+        if not (10 <= tiempo <= 500):
+            raise ValueError
+    except Exception:
+        faltantes.append("TCF válido")
+    if exigir_curva and not parsed.get("_curva_cf_png"):
+        faltantes.append("curva carótido-femoral capturable")
+    if faltantes:
+        raise ValueError("Datos indispensables no reconocidos: " + ", ".join(dict.fromkeys(faltantes)))
+
+    e = VascularEngine()
+    vop_calc = e.calcular_vop(distancia, tiempo)
+    try:
+        vop_medida = float(vop_medida or 0)
+    except Exception:
+        vop_medida = 0.0
+    if 3 <= vop_medida <= 25:
+        vop = round(vop_medida, 2)
+        fuente_vop = "VOP cf medida"
+    elif 3 <= vop_calc <= 25:
+        vop = round(vop_calc, 2)
+        fuente_vop = "VOP cf recalculada desde distancia/tiempo"
+    else:
+        raise ValueError("No se obtuvo una VOP carotídeo-femoral válida entre 3 y 25 m/s.")
+
+    fecha_estudio, obra_social, medico_solicitante = _metadatos_adicionales_vop(
+        parsed, fecha_respaldo, obra_social_respaldo, medico_respaldo
+    )
+    p10, p25, p50, p75, p90 = e.obtener_percentiles(edad, sexo)
+    fenotipo, color, _ = e.clasificar_fenotipo(vop, p10, p90, edad=edad, p75=p75)
+    edad_vasc = e.edad_vascular(vop, sexo)
+    pp = e.presion_pulso(pas, pad)
+    pam = e.presion_arterial_media(pas, pad)
+    patron_rigidez = fenotipo
+    lob_bool = e.lob_por_rigidez(vop, edad, p90)
+    lob = f"SI (VOP > p90: {p90} m/s)" if lob_bool else "NO"
+    recs = e.recomendaciones(fenotipo, vop, pas, pad)
+
+    chart_buf = construir_grafico_didactico(
+        edad, sexo, vop, p10, p25, p50, p75, p90, color, edad_vasc
+    )
+    datos = {
+        "nombre": nombre,
+        "documento": documento,
+        "edad": edad,
+        "sexo": sexo,
+        "medico_solicitante": medico_solicitante,
+        "fecha_estudio": fecha_estudio,
+        "obra_social": obra_social,
+    }
+    resultados = {
+        "vop": vop, "pas": pas, "pad": pad, "pp": pp, "pam": pam,
+        "p10": p10, "p25": p25, "p50": p50, "p75": p75, "p90": p90,
+        "lob": lob, "edad": edad, "edad_vasc": edad_vasc,
+        "patron_rigidez": patron_rigidez,
+    }
+    pdf_bytes = construir_pdf(
+        datos, resultados, fenotipo, recs, chart_buf, profesional,
+        parsed.get("_curva_cf_png"),
+        logo_path=perfil_pdf.get("logo_path"),
+        firma_path=perfil_pdf.get("firma_path"),
+        sello_path=perfil_pdf.get("sello_path"),
+    )
+    nombre_pdf = _nombre_pdf_vop(nombre, fecha_estudio, obra_social)
+    return {
+        "archivo_origen": archivo_nombre,
+        "nombre_pdf": nombre_pdf,
+        "pdf_bytes": pdf_bytes,
+        "datos": datos,
+        "resultados": resultados,
+        "fenotipo": fenotipo,
+        "fuente_vop": fuente_vop,
+        "distancia": distancia,
+        "tiempo": tiempo,
+        "curva_detectada": bool(parsed.get("_curva_cf_png")),
+    }
+
+
+def _crear_zip_lote_vop(exitos, errores, registros, originales=None):
+    salida = BytesIO()
+    with zipfile.ZipFile(salida, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for item in exitos:
+            zf.writestr(f"informes_pdf/{item['nombre_pdf']}", item["pdf_bytes"])
+        resumen_df = pd.DataFrame(registros)
+        if not resumen_df.empty:
+            zf.writestr("resumen_lote_vop.xlsx", _excel_bytes_registros(resumen_df, "Resumen_Lote_VOP"))
+        if errores:
+            err_df = pd.DataFrame(errores)
+            zf.writestr("errores_lote.csv", err_df.to_csv(index=False).encode("utf-8-sig"))
+        if originales:
+            for nombre, contenido in originales:
+                zf.writestr(f"pdf_originales/{_sanitizar_componente_archivo(nombre, 'original.pdf')}", contenido)
+        leeme = (
+            "PROCESAMIENTO POR LOTES VOP\n"
+            f"Fecha de generación: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}\n"
+            f"Informes generados: {len(exitos)}\n"
+            f"Estudios con error: {len(errores)}\n\n"
+            "Cada PDF fue procesado de forma independiente. Un error individual no detuvo el resto del lote.\n"
+            "El archivo resumen_lote_vop.xlsx contiene los estudios exitosos y errores_lote.csv detalla los fallidos.\n"
+        )
+        zf.writestr("LEEME.txt", leeme.encode("utf-8"))
+    return salida.getvalue()
+
+
+def render_procesamiento_lote_vop(profesional):
+    st.header("📦 Informes VOP por lotes")
+    st.caption(
+        "Importe simultáneamente hasta 100 PDF VOP. Cada archivo se analiza de forma independiente, "
+        "se genera un informe médico individual y los resultados se entregan juntos en un ZIP."
+    )
+
+    perfil_pdf = _perfil_usuario_actual(st.session_state.get("username", ""))
+    assets = []
+    if perfil_pdf.get("logo_path"):
+        assets.append("logo")
+    if perfil_pdf.get("firma_path"):
+        assets.append("firma")
+    if perfil_pdf.get("sello_path"):
+        assets.append("sello")
+    st.info("Recursos comunes aplicados a todos los informes: " + (", ".join(assets) if assets else "ninguno cargado"))
+
+    archivos = st.file_uploader(
+        "Seleccionar PDF VOP", type=["pdf"], accept_multiple_files=True,
+        key="vop_lote_upload", help="Máximo: 100 PDF por lote."
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        fecha_respaldo = st.date_input(
+            "Fecha de respaldo cuando el PDF no la informa",
+            value=datetime.date.today(), key="vop_lote_fecha"
+        )
+        medico_respaldo = st.text_input(
+            "Médico solicitante de respaldo", key="vop_lote_medico"
+        )
+    with c2:
+        obra_respaldo = st.text_input(
+            "Obra social de respaldo", key="vop_lote_obra"
+        )
+        agregar_historial = st.checkbox(
+            "Agregar estudios exitosos al historial sin borrar registros previos",
+            value=True, key="vop_lote_historial"
+        )
+    exigir_curva = st.checkbox(
+        "Exigir captura independiente de la curva carótido-femoral real",
+        value=True, key="vop_lote_exigir_curva"
+    )
+    incluir_originales = st.checkbox(
+        "Incluir los PDF originales dentro del ZIP", value=False,
+        key="vop_lote_incluir_originales"
+    )
+
+    if archivos and len(archivos) > 100:
+        st.error(f"Se seleccionaron {len(archivos)} archivos. El máximo permitido es 100.")
+
+    procesar = st.button(
+        "Procesar lote y generar informes", type="primary",
+        disabled=not archivos or len(archivos) > 100,
+        key="btn_procesar_lote_vop"
+    )
+
+    if procesar:
+        exitos = []
+        errores = []
+        registros = []
+        originales = []
+        usados = set()
+        barra = st.progress(0.0)
+        estado = st.empty()
+        usuario = st.session_state.get("username", "")
+        rol = st.session_state.get("user_role", DEFAULT_ROLE)
+
+        for idx, uploaded in enumerate(archivos, 1):
+            nombre_origen = getattr(uploaded, "name", f"estudio_{idx}.pdf")
+            estado.write(f"Procesando {idx}/{len(archivos)}: **{nombre_origen}**")
+            try:
+                contenido = uploaded.getvalue()
+                if not contenido:
+                    raise ValueError("El archivo está vacío.")
+                item = _procesar_pdf_vop_lote(
+                    contenido, nombre_origen, profesional, perfil_pdf,
+                    fecha_respaldo, obra_respaldo, medico_respaldo, exigir_curva
+                )
+                item["nombre_pdf"] = _nombre_unico_lote(item["nombre_pdf"], usados)
+                registro = _registro_vop_desde_resultado(
+                    item["datos"], item["resultados"], item["fenotipo"],
+                    nombre_origen, item["fuente_vop"], item["distancia"], item["tiempo"],
+                    usuario, rol
+                )
+                if agregar_historial:
+                    _guardar_registro_paciente(registro)
+                exitos.append(item)
+                registros.append(registro)
+                if incluir_originales:
+                    originales.append((nombre_origen, contenido))
+            except Exception as exc:
+                errores.append({
+                    "archivo": nombre_origen,
+                    "estado": "ERROR",
+                    "motivo": str(exc),
+                })
+            barra.progress(idx / len(archivos))
+
+        zip_bytes = _crear_zip_lote_vop(exitos, errores, registros, originales)
+        st.session_state["vop_lote_resultado"] = {
+            "exitos": exitos,
+            "errores": errores,
+            "registros": registros,
+            "zip_bytes": zip_bytes,
+            "fecha": datetime.datetime.now().strftime("%Y%m%d_%H%M%S"),
+        }
+        estado.empty()
+        if exitos:
+            st.success(f"Lote finalizado: {len(exitos)} informes generados correctamente.")
+        if errores:
+            st.warning(f"{len(errores)} estudios no pudieron completarse. Los motivos se detallan abajo y dentro del ZIP.")
+
+    resultado = st.session_state.get("vop_lote_resultado")
+    if not resultado:
+        return
+
+    exitos = resultado.get("exitos", [])
+    errores = resultado.get("errores", [])
+    c1, c2, c3 = st.columns(3)
+    c1.metric("PDF seleccionados", len(exitos) + len(errores))
+    c2.metric("Informes generados", len(exitos))
+    c3.metric("Con error", len(errores))
+
+    if exitos:
+        st.download_button(
+            "⬇️ Descargar lote completo en ZIP",
+            data=resultado["zip_bytes"],
+            file_name=f"Informes_VOP_Lote_{resultado['fecha']}.zip",
+            mime="application/zip",
+            key="download_zip_lote_vop",
+        )
+        st.subheader("Descarga individual de informes")
+        for i, item in enumerate(exitos):
+            cols = st.columns([4, 2, 1])
+            cols[0].write(f"**{item['datos']['nombre']}**")
+            cols[1].write(f"VOP {item['resultados']['vop']} m/s")
+            cols[2].download_button(
+                "PDF", data=item["pdf_bytes"], file_name=item["nombre_pdf"],
+                mime="application/pdf", key=f"vop_individual_{resultado['fecha']}_{i}"
+            )
+
+    if errores:
+        st.subheader("Estudios con error")
+        st.dataframe(pd.DataFrame(errores), use_container_width=True)
+
 # ---------------------------------------------------------------------------
 # INTERFAZ STREAMLIT
 # ---------------------------------------------------------------------------
@@ -1703,7 +2119,11 @@ def main():
                                         value="Dr. / Dra. ____________________")
     usuario_actual = st.session_state.get("username", "")
     perfil_actual = _perfil_usuario_actual(usuario_actual)
-    with st.sidebar.expander("Firma y sello digital"):
+    with st.sidebar.expander("Logo, firma y sello digital"):
+        if perfil_actual.get("logo_path"):
+            st.image(perfil_actual["logo_path"], caption="Logo cargado", width=100)
+        else:
+            st.caption("Sin logo cargado.")
         if perfil_actual.get("firma_path"):
             st.image(perfil_actual["firma_path"], caption="Firma cargada", width=120)
         else:
@@ -1712,20 +2132,23 @@ def main():
             st.image(perfil_actual["sello_path"], caption="Sello cargado", width=100)
         else:
             st.caption("Sin sello cargado.")
+        up_logo = st.file_uploader("Actualizar logo", type=["png", "jpg", "jpeg"], key="up_logo_usuario")
         up_firma = st.file_uploader("Actualizar firma", type=["png", "jpg", "jpeg"], key="up_firma_usuario")
         up_sello = st.file_uploader("Actualizar sello", type=["png", "jpg", "jpeg"], key="up_sello_usuario")
-        if st.button("Guardar firma/sello", key="btn_guardar_assets_usuario"):
+        if st.button("Guardar logo/firma/sello", key="btn_guardar_assets_usuario"):
             try:
+                if up_logo is not None:
+                    _guardar_asset_usuario(usuario_actual, up_logo, "logo")
                 if up_firma is not None:
                     _guardar_asset_usuario(usuario_actual, up_firma, "firma")
                 if up_sello is not None:
                     _guardar_asset_usuario(usuario_actual, up_sello, "sello")
-                st.success("Firma/sello guardados.")
+                st.success("Logo, firma y sello guardados.")
                 st.rerun()
             except Exception as exc:
                 st.error(f"No se pudo guardar firma/sello: {exc}")
         perfil_actual = _perfil_usuario_actual(usuario_actual)
-    menu = ["Nuevo Estudio", "Historial y Exportación"]
+    menu = ["Nuevo Estudio", "Procesamiento por lotes", "Historial y Exportación"]
     choice = st.sidebar.selectbox("Menú", menu)
 
     if choice == "Nuevo Estudio":
@@ -1963,6 +2386,7 @@ def main():
                 perfil_pdf = _perfil_usuario_actual(st.session_state.get("username", ""))
                 pdf_bytes = construir_pdf(datos, res, fenotipo, recs,
                                           chart_buf, profesional, ram.get("_curva_cf_png"),
+                                          logo_path=perfil_pdf.get("logo_path"),
                                           firma_path=perfil_pdf.get("firma_path"),
                                           sello_path=perfil_pdf.get("sello_path"))
 
@@ -2024,6 +2448,9 @@ def main():
                 st.success("Registro guardado en la base histórica local.")
             except Exception as exc:
                 st.warning(f"El informe se generó, pero no se pudo guardar el registro histórico: {exc}")
+
+    elif choice == "Procesamiento por lotes":
+        render_procesamiento_lote_vop(profesional)
 
     elif choice == "Historial y Exportación":
         rol = st.session_state.get("user_role", "medico")
