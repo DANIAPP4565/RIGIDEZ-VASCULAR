@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Vascular Health Analyzer - EVA / SUPERNOVA
-Informe PDF profesional para exportación médica + importación de PDF/TXT.
+INFORME MEDICION DE VELOCIDAD DE ONDA DEL PULSO
+Informe PDF profesional de una hoja + importación de PDF/TXT.
 """
 
 import datetime
@@ -99,8 +99,10 @@ except Exception:
 # ---------------------------------------------------------------------------
 # CONFIGURACIÓN
 # ---------------------------------------------------------------------------
+APP_TITLE = "INFORME MEDICION DE VELOCIDAD DE ONDA DEL PULSO"
+
 st.set_page_config(
-    page_title="Vascular Health Analyzer - EVA/SUPERNOVA",
+    page_title=APP_TITLE,
     layout="wide",
     page_icon="🫀",
 )
@@ -1312,11 +1314,13 @@ def construir_grafico_didactico(edad, sexo, vop, p10, p25, p50, p75, p90, color_
 # GENERADOR DE PDF PROFESIONAL
 # ---------------------------------------------------------------------------
 class PDFReport(FPDF):
-    """PDF integrado en 3 hojas A4.
+    """Informe médico VOP compacto en una sola hoja A4.
 
-    Hoja 1: datos del paciente, resultados, diagnóstico y captura carótido-femoral.
-    Hoja 2: lámina didáctica e interpretación clínica.
-    Hoja 3: recomendaciones, cierre médico, firma y sello digital con espacio suficiente.
+    Contenido principal:
+    1) Datos del paciente.
+    2) Metodología de medición de VOP.
+    3) Resultado.
+    4) Lámina didáctica.
     """
     def __init__(self, profesional="", logo_path=None, firma_path=None, sello_path=None):
         super().__init__(orientation="P", unit="mm", format="A4")
@@ -1324,9 +1328,8 @@ class PDFReport(FPDF):
         self.logo_path = logo_path
         self.firma_path = firma_path
         self.sello_path = sello_path
-        # Se usa salto automático moderado. La distribución principal se controla manualmente
-        # para estabilizar el informe integrado en 3 hojas.
-        self.set_auto_page_break(auto=True, margin=14)
+        # Informe deliberadamente limitado a una sola hoja A4.
+        self.set_auto_page_break(auto=False, margin=12)
         self.set_margins(left=12, top=10, right=12)
         self.alias_nb_pages()
 
@@ -1341,12 +1344,12 @@ class PDFReport(FPDF):
                 titulo_x = 31
         except Exception:
             titulo_x = 12
-        self.set_font("Arial", "B", 11.5)
-        self.set_xy(titulo_x, 4)
-        self.cell(0, 5, safe_latin1("LABORATORIO VASCULAR NO INVASIVO"), 0, 1, "L")
-        self.set_font("Arial", "I", 7.8)
+        self.set_font("Arial", "B", 9.8)
+        self.set_xy(titulo_x, 3.6)
+        self.cell(0, 5, safe_latin1(APP_TITLE), 0, 1, "L")
+        self.set_font("Arial", "I", 7.2)
         self.set_x(titulo_x)
-        self.cell(0, 4, safe_latin1("Evaluación de Rigidez Arterial - Percentiles por Edad / EVA-SUPERNOVA"), 0, 1, "L")
+        self.cell(0, 4, safe_latin1("VOP carotídeo-femoral - Evaluación no invasiva de rigidez arterial"), 0, 1, "L")
         self.set_xy(150, 4)
         self.set_font("Arial", "", 7.2)
         self.cell(48, 4, safe_latin1(f"Folio: VAS-{datetime.datetime.now().strftime('%Y%m%d%H%M')}"), 0, 1, "R")
@@ -1398,6 +1401,107 @@ class PDFReport(FPDF):
             self.set_font("Arial", "", 8.2)
             self.cell(53, 5.8, safe_latin1(str(f[3])[:38]), 1, 1, "L")
         self.ln(2)
+
+    def metodologia_medicion_vop(self, r):
+        self.section_title("Metodología de medición de VOP")
+        self.set_font("Arial", "", 7.6)
+        distancia = r.get("distancia")
+        tiempo = r.get("tiempo")
+        fuente = r.get("fuente_vop") or "VOP cf informada por el equipo / control por distancia-tiempo"
+        distancia_txt = f"{distancia:g} cm" if isinstance(distancia, (int, float)) and distancia > 0 else "No consignada"
+        tiempo_txt = f"{tiempo:g} ms" if isinstance(tiempo, (int, float)) and tiempo > 0 else "No consignado"
+
+        self.set_fill_color(245, 247, 250)
+        self.set_font("Arial", "B", 7.4)
+        self.cell(42, 5.2, safe_latin1("Territorio"), 1, 0, "L", fill=True)
+        self.set_font("Arial", "", 7.4)
+        self.cell(51, 5.2, safe_latin1("Carótido-femoral"), 1, 0, "L")
+        self.set_font("Arial", "B", 7.4)
+        self.cell(42, 5.2, safe_latin1("Distancia CF"), 1, 0, "L", fill=True)
+        self.set_font("Arial", "", 7.4)
+        self.cell(51, 5.2, safe_latin1(distancia_txt), 1, 1, "L")
+
+        self.set_font("Arial", "B", 7.4)
+        self.cell(42, 5.2, safe_latin1("Tiempo de tránsito CF"), 1, 0, "L", fill=True)
+        self.set_font("Arial", "", 7.4)
+        self.cell(51, 5.2, safe_latin1(tiempo_txt), 1, 0, "L")
+        self.set_font("Arial", "B", 7.4)
+        self.cell(42, 5.2, safe_latin1("Fuente del resultado"), 1, 0, "L", fill=True)
+        self.set_font("Arial", "", 6.9)
+        self.cell(51, 5.2, safe_latin1(str(fuente)[:34]), 1, 1, "L")
+
+        self.ln(1.0)
+        self.set_font("Arial", "", 7.2)
+        metodologia = (
+            "La VOP carótido-femoral se utiliza como medida no invasiva de rigidez aórtica. "
+            "Se integran la distancia carótido-femoral y el tiempo de tránsito entre señales. "
+            "Cuando el equipo informa una VOP cf medida, ese valor se utiliza como resultado primario; "
+            "el cálculo distancia/tiempo se conserva como control técnico. La interpretación se contextualiza "
+            "por edad, sexo y percentiles de referencia."
+        )
+        self.multi_cell(0, 3.4, safe_latin1(metodologia))
+        self.ln(1.0)
+
+    def resultado_resumido(self, r, fenotipo):
+        self.section_title("Resultado")
+        self.set_fill_color(245, 247, 250)
+        items = [
+            ("VOP carótido-femoral", f"{r.get('vop', '-')} m/s"),
+            ("Presión arterial", f"{r.get('pas', '-')}/{r.get('pad', '-')} mmHg"),
+            ("Percentil 50", f"{r.get('p50', '-')} m/s"),
+            ("Percentil 90", f"{r.get('p90', '-')} m/s"),
+        ]
+        for i in range(0, 4, 2):
+            for label, valor in items[i:i+2]:
+                self.set_font("Arial", "B", 7.6)
+                self.cell(43, 5.4, safe_latin1(label), 1, 0, "L", fill=True)
+                self.set_font("Arial", "B", 8.0)
+                self.cell(50, 5.4, safe_latin1(valor), 1, 0, "C")
+            self.ln()
+
+        if str(fenotipo).startswith("EVA"):
+            fill = COLOR_BG_ALERT; txt = (155, 30, 20)
+        elif "SUPERNOVA" in str(fenotipo):
+            fill = (217, 232, 252); txt = (28, 80, 140)
+        else:
+            fill = COLOR_BG_OK; txt = (28, 110, 60)
+        y0 = self.get_y() + 1.0
+        self.set_fill_color(*fill)
+        self.set_draw_color(*txt)
+        self.rect(12, y0, 186, 13.5, "DF")
+        self.set_xy(15, y0 + 2.0)
+        self.set_text_color(*txt)
+        self.set_font("Arial", "B", 8.3)
+        self.cell(0, 4.2, safe_latin1(f"Interpretación: {fenotipo}"), 0, 1, "L")
+        self.set_x(15)
+        self.set_font("Arial", "", 7.1)
+        patron = r.get("patron_rigidez") or fenotipo
+        lob = r.get("lob", "-")
+        self.cell(0, 3.7, safe_latin1(f"Clasificación: {str(patron)[:92]} | LOB por rigidez: {lob}"), 0, 1, "L")
+        self.set_y(y0 + 15.0)
+        self.set_text_color(0, 0, 0)
+        self.set_draw_color(0, 0, 0)
+
+    def insert_chart_una_hoja(self, image_bytes):
+        self.section_title("Lámina didáctica")
+        image_bytes.seek(0)
+        y0 = self.get_y()
+        try:
+            self.image(image_bytes, x=23, y=y0, w=164, h=108)
+        except Exception:
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                image_bytes.seek(0)
+                tf.write(image_bytes.read())
+                tmp_path = tf.name
+            try:
+                self.image(tmp_path, x=23, y=y0, w=164, h=108)
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+        self.set_y(y0 + 109.0)
 
     def resultados_table(self, r):
         self.section_title("Resultados Hemodinámicos")
@@ -1475,7 +1579,7 @@ class PDFReport(FPDF):
         bio = BytesIO(image_bytes) if isinstance(image_bytes, (bytes, bytearray)) else image_bytes
         bio.seek(0)
         try:
-            # En el informe de 3 hojas se prioriza conservar esta imagen en página 1.
+            # Método conservado por compatibilidad con capturas del estudio original.
             if self.get_y() > 190:
                 self.add_page()
             self.image(bio, x=22, w=150)
@@ -1600,7 +1704,7 @@ class PDFReport(FPDF):
         - Antes de cada multi_cell se reinicia X al margen izquierdo.
         - Se usa ancho explícito para evitar el error:
           FPDFException: Not enough horizontal space to render a single character.
-        - Se limita la cantidad de referencias para preservar el informe de 3 hojas.
+        - Se limita la cantidad de referencias cuando este método se reutiliza en otros formatos.
         """
         self.section_title("Referencias Bibliográficas")
         self.set_font("Arial", "", 6.4)
@@ -1659,39 +1763,31 @@ class PDFReport(FPDF):
 
 
 def construir_pdf(datos, resultados, fenotipo, recs, chart_buf, profesional, curva_cf_png=None, logo_path=None, firma_path=None, sello_path=None):
-    pdf = PDFReport(profesional=profesional, logo_path=logo_path, firma_path=firma_path, sello_path=sello_path)
-
-    # Hoja 1: resumen clínico + evidencia original CF.
+    """Genera el informe médico VOP solicitado en una única hoja A4."""
+    pdf = PDFReport(
+        profesional=profesional, logo_path=logo_path,
+        firma_path=firma_path, sello_path=sello_path
+    )
     pdf.add_page()
     pdf.patient_info(datos)
-    pdf.resultados_table(resultados)
-    pdf.diagnostico_box(fenotipo, vop=resultados.get("vop"), edad=resultados.get("edad"),
-                        p90=resultados.get("p90"), patron_rigidez=resultados.get("patron_rigidez"))
-    pdf.insert_imported_cf_curve(curva_cf_png)
+    pdf.metodologia_medicion_vop(resultados)
+    pdf.resultado_resumido(resultados, fenotipo)
+    pdf.insert_chart_una_hoja(chart_buf)
 
-    # Hoja 2: gráfico didáctico + interpretación.
-    pdf.add_page()
-    pdf.insert_chart(chart_buf)
-    pdf.interpretacion(fenotipo, resultados["vop"], resultados["edad"],
-                       resultados["edad_vasc"], p75=resultados.get("p75"),
-                       p90=resultados.get("p90"), patron_rigidez=resultados.get("patron_rigidez"))
-
-    # Hoja 3: recomendaciones + cierre + firma y sello con espacio suficiente.
-    pdf.add_page()
-    pdf.recomendaciones_clinicas(recs)
-    pdf.cierre_medico(fenotipo, vop=resultados.get("vop"), edad=resultados.get("edad"),
-                       p90=resultados.get("p90"), patron_rigidez=resultados.get("patron_rigidez"),
-                       pas=resultados.get("pas"), pad=resultados.get("pad"), pp=resultados.get("pp"))
-    pdf.referencias_bibliograficas()
-    pdf.firma()
-
-    # Seguridad: limitar el informe integrado a 3 páginas.
+    # Firma compacta al pie, sin generar una segunda página.
+    y_firma = min(max(pdf.get_y() + 1.0, 263.0), 270.0)
     try:
-        while getattr(pdf, "page", 0) > 3:
-            pdf.pages.pop(pdf.page, None)
-            pdf.page -= 1
+        if firma_path and os.path.exists(firma_path):
+            pdf.image(firma_path, x=137, y=y_firma - 9, w=26)
+        if sello_path and os.path.exists(sello_path):
+            pdf.image(sello_path, x=166, y=y_firma - 9, w=20)
     except Exception:
         pass
+    pdf.set_xy(118, y_firma)
+    pdf.set_draw_color(80, 80, 80)
+    pdf.line(118, y_firma, 192, y_firma)
+    pdf.set_font("Arial", "B", 7.5)
+    pdf.cell(74, 4, safe_latin1(profesional or "Profesional responsable"), 0, 1, "C")
 
     out = pdf.output(dest="S")
     if isinstance(out, str):
@@ -1910,6 +2006,7 @@ def _procesar_pdf_vop_lote(pdf_bytes: bytes, archivo_nombre: str, profesional: s
         "p10": p10, "p25": p25, "p50": p50, "p75": p75, "p90": p90,
         "lob": lob, "edad": edad, "edad_vasc": edad_vasc,
         "patron_rigidez": patron_rigidez,
+        "distancia": distancia, "tiempo": tiempo, "fuente_vop": fuente_vop,
     }
     pdf_bytes = construir_pdf(
         datos, resultados, fenotipo, recs, chart_buf, profesional,
@@ -2114,6 +2211,9 @@ def main():
     st.session_state.username = DEFAULT_USERNAME
     st.session_state.user_role = DEFAULT_ROLE
 
+    st.title(APP_TITLE)
+    st.caption("Evaluación automatizada de VOP carótido-femoral con informe médico PDF de una hoja.")
+
     st.sidebar.title("Modo directo")
     profesional = st.sidebar.text_input("Profesional responsable",
                                         value="Dr. / Dra. ____________________")
@@ -2152,7 +2252,7 @@ def main():
     choice = st.sidebar.selectbox("Menú", menu)
 
     if choice == "Nuevo Estudio":
-        st.header("📋 Registro de Evaluación Vascular")
+        st.header("📋 Nuevo estudio de velocidad de onda del pulso")
 
         # ------- Importador PDF  -------
         with st.expander("📤 Importar mediciones desde archivo PDF o TXT", expanded=True):
@@ -2379,10 +2479,12 @@ def main():
                          "medico_solicitante": medico_solicitante,
                          "fecha_estudio": fecha_estudio,
                          "obra_social": obra_social}
+                fuente_vop_pdf = "VOP cf medida" if vop_medida > 0 else "VOP cf recalculada desde distancia/tiempo"
                 res = {"vop": vop, "pas": pas, "pad": pad, "pp": pp, "pam": pam,
                        "p10": p10, "p50": p50, "p75": p75, "p90": p90, "lob": lob,
                        "edad": edad, "edad_vasc": edad_vasc,
-                       "patron_rigidez": patron_rigidez}
+                       "patron_rigidez": patron_rigidez,
+                       "distancia": distancia, "tiempo": tiempo, "fuente_vop": fuente_vop_pdf}
                 perfil_pdf = _perfil_usuario_actual(st.session_state.get("username", ""))
                 pdf_bytes = construir_pdf(datos, res, fenotipo, recs,
                                           chart_buf, profesional, ram.get("_curva_cf_png"),
@@ -2396,7 +2498,7 @@ def main():
                     obra_social=obra_social,
                 )
                 st.download_button(
-                    "Descargar Informe PDF Profesional",
+                    "Descargar informe VOP PDF - 1 hoja",
                     data=pdf_bytes,
                     file_name=nombre_archivo_pdf,
                     mime="application/pdf",
